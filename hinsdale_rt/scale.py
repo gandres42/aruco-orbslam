@@ -1,9 +1,12 @@
 import cv2  # ty: ignore[unresolved-import]
 from cv_bridge import CvBridge
+from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Path
 import numpy as np
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from scipy.spatial.transform import Rotation
 from sensor_msgs.msg import Image
 import os
 import orbslam2
@@ -17,6 +20,12 @@ CAMERA_MATRIX = np.array([
     [0.0, 0.0, 1.0],
 ])
 DIST_COEFFS = np.zeros(5)
+# CV camera convention (x-right, y-down, z-forward) -> ROS convention (x-forward, y-left, z-up)
+CV_TO_ROS = np.array([
+    [0.0, 0.0, 1.0],
+    [-1.0, 0.0, 0.0],
+    [0.0, -1.0, 0.0],
+])
 TAG_SIZES = {
     "14": 0.15,
     "12": 0.20,
@@ -37,6 +46,7 @@ class ScaledOrbNode(Node):
         self.slam.set_use_viewer(True)
         self.slam.initialize()
         self.rolling_scale_window = []
+        self.rolling_scale_estimate = 0
 
         # aruco params
         dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, 'DICT_6X6_50'))
@@ -54,6 +64,7 @@ class ScaledOrbNode(Node):
         # pub, sub, blub blub
         self.cam_sub = self.create_subscription(Image, "/BlueROV2/video", self.camera_cb, 1)
         self.annotated_publisher = self.create_publisher(Image, "/aruco/annotated", 1)
+        self.trajectory_publisher = self.create_publisher(Path, "/reference_trajectory", 1)
 
 
     def camera_cb(self, msg: Image):
@@ -121,13 +132,43 @@ class ScaledOrbNode(Node):
         if current_position is not None and marker_bool_mask.any():
             avg_ratio = np.mean(metric_distances[marker_bool_mask] / slam_distances[marker_bool_mask])
             self.rolling_scale_window.append(avg_ratio)
-            if len(self.rolling_scale_window) > 100:
+            if len(self.rolling_scale_window) > 200:
                 self.rolling_scale_window.pop(0)
-        print(f'avg metric/slam distance diff: {np.mean(self.rolling_scale_window):.4f}')
+        self.rolling_scale_estimate = np.mean(self.rolling_scale_window)
+        print(f'avg metric/slam distance diff: {self.rolling_scale_estimate:.2f}')
 
 
         for x, y in tracked_pixels_2d[marker_bool_mask]:
             cv2.circle(annotated_aruco, (int(round(x)), int(round(y))), 3, (0, 255, 0), -1)
+
+        # PUBLISH TRAJECTORY
+        # get the current trajectory from orbslam and scale it by self.rolling_scale_estimate
+        path_msg = Path()
+        path_msg.header.stamp = msg.header.stamp
+        path_msg.header.frame_id = 'map'
+        for _, r00, r01, r02, tx, r10, r11, r12, ty, r20, r21, r22, tz in trajectory:
+            rotation_matrix = np.array([[r00, r01, r02], [r10, r11, r12], [r20, r21, r22]])
+            translation = np.array([tx, ty, tz]) * self.rolling_scale_estimate
+
+            # both the world and camera axes are in CV convention, so the same
+            # change-of-basis rotation is applied on both sides of the pose
+            translation = CV_TO_ROS @ translation
+            rotation_matrix = CV_TO_ROS @ rotation_matrix @ CV_TO_ROS.T
+            qx, qy, qz, qw = Rotation.from_matrix(rotation_matrix).as_quat()
+
+            pose = PoseStamped()
+            pose.header = path_msg.header
+            pose.pose.position.x = translation[0]
+            pose.pose.position.y = translation[1]
+            pose.pose.position.z = translation[2]
+            pose.pose.orientation.x = qx
+            pose.pose.orientation.y = qy
+            pose.pose.orientation.z = qz
+            pose.pose.orientation.w = qw
+            path_msg.poses.append(pose)
+
+        # publish the scaled trajectory as a ros2 path topic at /reference_trajectory
+        self.trajectory_publisher.publish(path_msg)
 
         # DEBUG IMAGE
         annotated_out_msg = self.bridge.cv2_to_imgmsg(annotated_aruco, 'bgr8')

@@ -20,7 +20,7 @@ ORBextractor.nFeatures: 10000
 ORBextractor.scaleFactor: 1.3
 ORBextractor.nLevels: 8
 ORBextractor.iniThFAST: 20
-ORBextractor.minThFAST: 8
+ORBextractor.minThFAST: 12
 
 # Viewer (only used when USE_VIEWER is True)
 Viewer.KeyFrameSize: 0.05
