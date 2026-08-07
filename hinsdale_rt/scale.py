@@ -149,6 +149,7 @@ class ScaledOrbNode(Node):
         path_msg = Path()
         path_msg.header.stamp = msg.header.stamp
         path_msg.header.frame_id = 'map'
+        origin_offset = None
         for _, r00, r01, r02, tx, r10, r11, r12, ty, r20, r21, r22, tz in trajectory:
             rotation_matrix = np.array([[r00, r01, r02], [r10, r11, r12], [r20, r21, r22]])
             translation = np.array([tx, ty, tz]) * self.rolling_scale_estimate
@@ -165,6 +166,11 @@ class ScaledOrbNode(Node):
             pose_ros = CAMERA_CORRECTION @ pose_ros
             rotation_matrix = pose_ros[:3, :3]
             translation = pose_ros[:3, 3]
+
+            # shift the whole path so the first pose sits at the origin
+            if origin_offset is None:
+                origin_offset = translation.copy()
+            translation = translation - origin_offset
 
             qx, qy, qz, qw = Rotation.from_matrix(rotation_matrix).as_quat()
 
