@@ -10,6 +10,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/config', ['hinsdale_rt/config/uffda.yaml']),
     ],
     package_data={'': ['py.typed']},
     install_requires=['setuptools'],
@@ -26,6 +27,7 @@ setup(
     entry_points={
         'console_scripts': [
             'aruco = hinsdale_rt.aruco:main',
+            'scale = hinsdale_rt.scale:main',
         ],
     },
 )

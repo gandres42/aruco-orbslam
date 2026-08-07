@@ -1,3 +1,4 @@
+from ament_index_python.packages import get_package_share_directory
 import cv2  # ty: ignore[unresolved-import]
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
@@ -11,6 +12,7 @@ from sensor_msgs.msg import Image
 import os
 import orbslam2
 import time
+from scipy.spatial.transform import Rotation as R
 
 VIDEO_TOPIC = '/BlueROV2/video'
 ANNOTATED_TOPIC = '/aruco/annotated_image'
@@ -35,6 +37,8 @@ TAG_SIZES = {
     "17": 0.075,
     "18": 0.05
 }
+CAMERA_CORRECTION = np.eye(4)
+CAMERA_CORRECTION[:3, :3] = R.from_euler('xyz', [0, 8, 0], degrees=True).as_matrix()
 
 class ScaledOrbNode(Node):
     def __init__(self):
@@ -42,8 +46,9 @@ class ScaledOrbNode(Node):
         self.bridge = CvBridge()
 
         # load orb-slam2
-        self.slam = orbslam2.System("/tmp/ORB_SLAM2/Vocabulary/ORBvoc.txt", "uffda.yaml", orbslam2.Sensor.MONOCULAR)
-        self.slam.set_use_viewer(True)
+        settings_file = os.path.join(get_package_share_directory('hinsdale_rt'), 'config', 'uffda.yaml')
+        self.slam = orbslam2.System("/tmp/ORB_SLAM2/Vocabulary/ORBvoc.txt", settings_file, orbslam2.Sensor.MONOCULAR)
+        self.slam.set_use_viewer(False)
         self.slam.initialize()
         self.rolling_scale_window = []
         self.rolling_scale_estimate = 0
@@ -135,8 +140,6 @@ class ScaledOrbNode(Node):
             if len(self.rolling_scale_window) > 200:
                 self.rolling_scale_window.pop(0)
         self.rolling_scale_estimate = np.mean(self.rolling_scale_window)
-        print(f'avg metric/slam distance diff: {self.rolling_scale_estimate:.2f}')
-
 
         for x, y in tracked_pixels_2d[marker_bool_mask]:
             cv2.circle(annotated_aruco, (int(round(x)), int(round(y))), 3, (0, 255, 0), -1)
@@ -154,6 +157,15 @@ class ScaledOrbNode(Node):
             # change-of-basis rotation is applied on both sides of the pose
             translation = CV_TO_ROS @ translation
             rotation_matrix = CV_TO_ROS @ rotation_matrix @ CV_TO_ROS.T
+
+            # correct for the camera's known mounting offset, in ROS frame
+            pose_ros = np.eye(4)
+            pose_ros[:3, :3] = rotation_matrix
+            pose_ros[:3, 3] = translation
+            pose_ros = CAMERA_CORRECTION @ pose_ros
+            rotation_matrix = pose_ros[:3, :3]
+            translation = pose_ros[:3, 3]
+
             qx, qy, qz, qw = Rotation.from_matrix(rotation_matrix).as_quat()
 
             pose = PoseStamped()
@@ -171,6 +183,7 @@ class ScaledOrbNode(Node):
         self.trajectory_publisher.publish(path_msg)
 
         # DEBUG IMAGE
+        cv2.putText(annotated_aruco, f'{self.rolling_scale_estimate:.2f}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
         annotated_out_msg = self.bridge.cv2_to_imgmsg(annotated_aruco, 'bgr8')
         annotated_out_msg.header = msg.header
         self.annotated_publisher.publish(annotated_out_msg)
