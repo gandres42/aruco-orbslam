@@ -1,0 +1,35 @@
+%YAML:1.0
+
+# Camera calibration and distortion parameters (OpenCV)
+Camera.fx: 1078.17559
+Camera.fy: 1076.46176
+Camera.cx: 1010.57086
+Camera.cy: 463.06243
+
+Camera.k1: 0.019645
+Camera.k2: 0.007271
+Camera.p1: -0.004324
+Camera.p2: -0.001628
+Camera.k3: 0.0
+
+Camera.fps: 24.0
+Camera.RGB: 0
+
+# ORB extractor (more features than the default 1000 for these 1080p frames)
+ORBextractor.nFeatures: 10000
+ORBextractor.scaleFactor: 1.3
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 8
+
+# Viewer (only used when USE_VIEWER is True)
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3
+Viewer.ViewpointX: 0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500
