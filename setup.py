@@ -26,8 +26,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'aruco = hinsdale_rt.aruco:main',
-            'scale = hinsdale_rt.scale:main',
+            'slam = hinsdale_rt.slam:main',
         ],
     },
 )
