@@ -59,11 +59,11 @@ Camera.fps: 24.0
 Camera.RGB: 0
 
 # ORB extractor
-ORBextractor.nFeatures: 1000
+ORBextractor.nFeatures: 7000
 ORBextractor.scaleFactor: 1.2
 ORBextractor.nLevels: 8
 ORBextractor.iniThFAST: 20
-ORBextractor.minThFAST: 8
+ORBextractor.minThFAST: 14
 
 # Viewer (only used when Viewer.UseViewer is True)
 Viewer.UseViewer: True
