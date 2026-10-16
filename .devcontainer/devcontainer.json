@@ -1,0 +1,44 @@
+{
+    "name": "arucoscale_ws",
+    "privileged": true,
+    "remoteUser": "${env:USER}",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "args": {
+            "USERNAME": "${env:USER}",
+            "CONTAINER_ID": "arucoscale_ws"
+        }
+    },
+    "workspaceFolder": "/home/${env:USER}/arucoscale_ws",
+    "workspaceMount": "source=${localWorkspaceFolder},target=/home/${env:USER}/arucoscale_ws,type=bind",
+    "runArgs": [
+        "--net=host",
+        "--pid=host",
+        "--ipc=host",
+        "-e", "DISPLAY=${env:DISPLAY}"
+    ],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "3xpo.regionfolding",
+                "meta.pyrefly",
+                "llvm-vs-code-extensions.vscode-clangd",
+                "mechatroner.rainbow-csv",
+                "ms-python.debugpy",
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-python.vscode-python-envs",
+                "tomoki1207.pdf",
+                "twxs.cmake",
+                "Anthropic.claude-code"
+            ]
+        }
+    },
+    "mounts": [
+       "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached",
+       "source=/dev/dri,target=/dev/dri,type=bind,consistency=cached",
+       "type=bind,source=/home/${localEnv:USER}/.ssh,target=/home/${env:USER}/.ssh,readonly",
+       "type=bind,source=/home/${localEnv:USER}/.dotfiles,target=/home/${env:USER}/.dotfiles,readonly",
+       "type=bind,source=/home/${localEnv:USER}/Datasets,target=/home/${env:USER}/datasets"
+    ]
+}
