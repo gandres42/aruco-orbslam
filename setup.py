@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'hinsdale_rt'
+package_name = 'aruco_orbslam'
 
 setup(
     name=package_name,
@@ -10,7 +10,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/config', ['hinsdale_rt/config/uffda.yaml']),
+        ('share/' + package_name + '/config', ['config/uffda.yaml']),
     ],
     package_data={'': ['py.typed']},
     install_requires=['setuptools'],
@@ -26,7 +26,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'slam = hinsdale_rt.slam:main',
+            'slam = aruco_orbslam.slam:main',
         ],
     },
 )

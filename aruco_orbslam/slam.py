@@ -1,8 +1,7 @@
 from ament_index_python.packages import get_package_share_directory
 from rclpy.executors import ExternalShutdownException
-from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Rotation as R # pyrefly: ignore[untyped-import]
 import cv2 # pyrefly: ignore [missing-import]
-from scipy.spatial.transform import Rotation
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
@@ -26,7 +25,7 @@ class ScaledOrbNode(Node):
         self.bridge = CvBridge()
 
         # load node params from the same settings file orb-slam3 uses
-        settings_file = os.path.join(get_package_share_directory('hinsdale_rt'), 'config', 'uffda.yaml')
+        settings_file = os.path.join(get_package_share_directory('aruco_orbslam'), 'config', 'uffda.yaml')
         fs = cv2.FileStorage(settings_file, cv2.FILE_STORAGE_READ)
         self.camera_matrix = np.array([
             [fs.getNode('Camera.fx').real(), 0.0, fs.getNode('Camera.cx').real()],
@@ -180,7 +179,7 @@ class ScaledOrbNode(Node):
                 origin_offset = translation.copy()
             translation = translation - origin_offset
 
-            qx, qy, qz, qw = Rotation.from_matrix(rotation_matrix).as_quat()
+            qx, qy, qz, qw = R.from_matrix(rotation_matrix).as_quat()
 
             pose = PoseStamped()
             pose.header = path_msg.header
