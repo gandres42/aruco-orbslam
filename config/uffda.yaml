@@ -7,7 +7,8 @@ ORB.vocabulary: "/usr/local/share/ORB_SLAM3/Vocabulary/ORBvoc.txt"
 # Video topics
 Topics.video: "/BlueROV2/video"
 Topics.annotated: "/aruco/annotated"
-Topics.trajectory: "/reference_trajectory"
+Topics.trajectory: "/aruco/reference_trajectory"
+Topics.pointcloud: "/aruco/pointcloud"
 Topics.frameId: "map"
 
 # ARUCO TAGS ------------------------------------------------------------------
@@ -25,7 +26,14 @@ Aruco.tags:
   - { id: 18, size: 0.05 }
 
 # number of frames averaged for the rolling scale estimate
-Scale.windowSize: 50
+Scale.windowSize: 30
+
+# Published map point cloud. New points start with 2 observations and orb-slam culls the ones that
+# are not matched again within a few keyframes, so requiring 3 keeps only points that have settled in
+PointCloud.minObservations: 3
+
+# how often (Hz) the whole map is republished
+PointCloud.rate: 1.0
 
 # Camera body rotation
 Correction.roll: 0.0
@@ -37,8 +45,13 @@ Correction.yaw: 0.0
 Camera.type: "PinHole"
 
 # Image size (required by the ORB-SLAM3 viewer)
-Camera.width: 1920
-Camera.height: 1080
+Camera.width: 640
+Camera.height: 360
+
+# Factor the node shrinks frames by before orb-slam sees them (1024 / 1920). Orb-slam3 does not resize
+# frames itself with this settings format, it only scales the camera calibration below by this factor, so
+# the calibration stays the full resolution one. Aruco detection keeps using the full resolution frame.
+Camera.imageScale: 0.5
 
 # Camera calibration and distortion
 Camera.fx: 1078.17559
@@ -59,11 +72,11 @@ Camera.fps: 24.0
 Camera.RGB: 0
 
 # ORB extractor
-ORBextractor.nFeatures: 1000
+ORBextractor.nFeatures: 2000
 ORBextractor.scaleFactor: 1.2
-ORBextractor.nLevels: 8
+ORBextractor.nLevels: 12
 ORBextractor.iniThFAST: 20
-ORBextractor.minThFAST: 8
+ORBextractor.minThFAST: 12
 
 # Viewer (only used when Viewer.UseViewer is True)
 Viewer.UseViewer: True

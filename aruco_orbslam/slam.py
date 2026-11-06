@@ -3,15 +3,18 @@ from rclpy.executors import ExternalShutdownException
 from scipy.spatial.transform import Rotation as R # pyrefly: ignore[untyped-import]
 import cv2 # pyrefly: ignore [missing-import]
 from geometry_msgs.msg import PoseStamped
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, PointCloud2
+from sensor_msgs_py import point_cloud2
 from cv_bridge import CvBridge
 from nav_msgs.msg import Path
 from rclpy.node import Node
+import open3d as o3d
 import numpy as np
 import orbslam3
 import rclpy
 import time
 import os
+
 
 CV_TO_ROS = np.array([
     [0.0, 0.0, 1.0],
@@ -42,6 +45,11 @@ class ScaledOrbNode(Node):
             fs.getNode('Correction.yaw').real(),
         ], degrees=True).as_matrix()
         self.scale_window_size = int(fs.getNode('Scale.windowSize').real())
+        image_scale = fs.getNode('Camera.imageScale')
+        self.image_scale = image_scale.real() if not image_scale.empty() else 1.0
+        self.pointcloud_min_observations = int(fs.getNode('PointCloud.minObservations').real())
+        self.pointcloud_period = 1.0 / fs.getNode('PointCloud.rate').real()
+        self.last_pointcloud_time = 0.0
         self.frame_id = fs.getNode('Topics.frameId').string()
 
         # load orb-slam3
@@ -69,6 +77,7 @@ class ScaledOrbNode(Node):
         self.cam_sub = self.create_subscription(Image, fs.getNode('Topics.video').string(), self.camera_cb, 1)
         self.annotated_publisher = self.create_publisher(Image, fs.getNode('Topics.annotated').string(), 1)
         self.trajectory_publisher = self.create_publisher(Path, fs.getNode('Topics.trajectory').string(), 1)
+        self.pointcloud_publisher = self.create_publisher(PointCloud2, fs.getNode('Topics.pointcloud').string(), 1)
         fs.release()
 
 
@@ -103,13 +112,18 @@ class ScaledOrbNode(Node):
                 # save it all for later
                 markers[str(marker_id)] = mask
 
-        # ORB PROCESSING 
-        self.slam.process_image_mono(bgr, time.monotonic())
+        # ORB PROCESSING
+        # orb-slam3 only scales its calibration by Camera.imageScale, it does not resize the frames
+        slam_frame = bgr
+        if self.image_scale != 1.0:
+            slam_frame = cv2.resize(bgr, None, fx=self.image_scale, fy=self.image_scale, interpolation=cv2.INTER_AREA)
+        self.slam.process_image_mono(slam_frame, time.monotonic())
 
         # get tracked orb features in 2D and 3D
         features = np.array(self.slam.get_tracked_features(), dtype=np.float64)
         if features.size:
-            tracked_pixels_2d = features[:, 0:2]
+            # feature pixels are in the resized frame, scale them back up to index the full resolution marker masks
+            tracked_pixels_2d = features[:, 0:2] / self.image_scale
             tracked_points_3d = features[:, 2:5]
         else:
             tracked_pixels_2d = np.empty((0, 2))
@@ -148,8 +162,8 @@ class ScaledOrbNode(Node):
                 self.rolling_scale_window.pop(0)
         self.rolling_scale_estimate = np.mean(self.rolling_scale_window)
 
-        for x, y in tracked_pixels_2d[marker_bool_mask]:
-            cv2.circle(annotated_aruco, (int(round(x)), int(round(y))), 3, (0, 255, 0), -1)
+        # for x, y in tracked_pixels_2d[marker_bool_mask]:
+        #     cv2.circle(annotated_aruco, (int(round(x)), int(round(y))), 3, (0, 255, 0), -1)
 
         # PUBLISH TRAJECTORY
         # get the current trajectory from orbslam and scale it by self.rolling_scale_estimate
@@ -195,11 +209,35 @@ class ScaledOrbNode(Node):
         # publish the scaled trajectory as a ros2 path topic at /reference_trajectory
         self.trajectory_publisher.publish(path_msg)
 
+        # PUBLISH POINT CLOUD
+        # the map points are in the same slam world frame as the trajectory, so they share its scale and
+        # origin shift. without a scale estimate yet (no marker seen) the points have no metric size.
+        # this is the whole map rather than just the points tracked in this frame, so it is republished
+        # at a lower rate than the camera
+        now = time.monotonic()
+        if origin_offset is not None and np.isfinite(self.rolling_scale_estimate) and now - self.last_pointcloud_time >= self.pointcloud_period:
+            self.last_pointcloud_time = now
+            map_points = np.array(self.slam.get_map_points(self.pointcloud_min_observations), dtype=np.float64).reshape(-1, 3)
+            cloud = o3d.geometry.PointCloud()
+            cloud.points = o3d.utility.Vector3dVector(map_points)
+
+            # the path scales translations about the slam world origin, so scale the points about it too
+            cloud.scale(self.rolling_scale_estimate, center=np.zeros(3))
+
+            # same change of basis, camera correction and origin shift that the path poses go through
+            cv_to_ros = np.eye(4)
+            cv_to_ros[:3, :3] = CV_TO_ROS
+            world_to_ros = self.camera_correction @ cv_to_ros
+            world_to_ros[:3, 3] -= origin_offset
+            cloud.transform(world_to_ros)
+
+            self.pointcloud_publisher.publish(point_cloud2.create_cloud_xyz32(path_msg.header, np.asarray(cloud.points, dtype=np.float32)))
+
         # DEBUG IMAGE
-        cv2.putText(annotated_aruco, f'{self.rolling_scale_estimate:.2f}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
-        annotated_out_msg = self.bridge.cv2_to_imgmsg(annotated_aruco, 'bgr8')
-        annotated_out_msg.header = msg.header
-        self.annotated_publisher.publish(annotated_out_msg)
+        # cv2.putText(annotated_aruco, f'{self.rolling_scale_estimate:.2f}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
+        # annotated_out_msg = self.bridge.cv2_to_imgmsg(annotated_aruco, 'bgr8')
+        # annotated_out_msg.header = msg.header
+        # self.annotated_publisher.publish(annotated_out_msg)
 
 
 def main(args=None):
