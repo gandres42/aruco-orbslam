@@ -76,10 +76,12 @@ class ScaledOrbNode(Node):
         self.slam.set_use_viewer(string('Viewer.UseViewer') == 'True')
         self.slam.initialize()
 
-        # running mean of the metric / slam scale ratio, reset whenever slam starts a new map
-        self.scale = 1.0
-        self.scale_samples = 0
+        # running mean and spread (welford) of the metric / slam scale ratio, reset whenever slam starts a new map.
+        # estimation stops once the mean's relative standard error drops below the tolerance
+        self.scale_min_samples = int(real('Scale.minSamples'))
+        self.scale_tolerance = real('Scale.tolerance')
         self.map_start = None
+        self.reset_scale()
 
         # ros interfaces
         self.frame_id = string('Topics.frameId')
@@ -91,37 +93,56 @@ class ScaledOrbNode(Node):
     def camera_cb(self, msg: Image):
         frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
 
-        # orb-slam3 only scales its calibration by Camera.imageScale, it does not resize the frames itself
+        # update orbslam using downscaled image
         slam_frame = frame
         if self.image_scale != 1.0:
             slam_frame = cv2.resize(frame, None, fx=self.image_scale, fy=self.image_scale, interpolation=cv2.INTER_AREA)
         self.slam.process_image_mono(slam_frame, time.monotonic())
 
-        # each row: timestamp, then a row-major 3x4 [R | t] camera pose in the slam world
+        # get SLAM trajectory, cols = timestamp, 4x4 pose matrix
         trajectory = self.slam.get_trajectory_points()
 
+        # update scale estimate
         self.update_scale(frame, trajectory)
+
+        # publish SLAM pointcloud and trajectory
         header = Header(stamp=msg.header.stamp, frame_id=self.frame_id)
         origin_offset = self.publish_trajectory(header, trajectory)
         if origin_offset is not None:
             self.publish_pointcloud(header, origin_offset)
 
+    def reset_scale(self):
+        self.scale = 1.0
+        self.scale_samples = 0
+        self.scale_m2 = 0.0  # sum of squared differences from the mean
+        self.scale_converged = False
+
+    def scale_relative_error(self):
+        """Standard error of the scale mean as a fraction of the mean (inf until there are 2 samples)."""
+        if self.scale_samples < 2:
+            return float('inf')
+        variance = self.scale_m2 / (self.scale_samples - 1)
+        return np.sqrt(variance / self.scale_samples) / self.scale
+
     def update_scale(self, frame, trajectory):
-        """Refine the scale estimate by comparing aruco (metric) and slam distances to features on the tags."""
-        # the first keyframe's timestamp identifies the map, so a change means slam restarted
+        """update scale estimate using known aruco tag sizes"""
+
+        # check if first keyframe has changed to identify orbslam restarts
         map_start = trajectory[0][0] if trajectory else None
         if map_start != self.map_start:
+            if self.scale_samples:
+                self.get_logger().info('slam map reset, restarting scale estimation')
             self.map_start = map_start
-            self.scale = 1.0
-            self.scale_samples = 0
-        if not trajectory:
+            self.reset_scale()
+        if not trajectory or self.scale_converged:
             return
 
+        # detect known markers
         corners, ids, _ = self.detector.detectMarkers(frame)
         if ids is None:
             return
 
-        # image mask holding each tag's metric distance from the camera over its pixels, 0 elsewhere
+        # calculate image mask where detected tags hold their estimated distance using known sizes
         distance_mask = np.zeros(frame.shape[:2], dtype=np.float32)
         for marker_corners, marker_id in zip(corners, ids.flatten()):
             object_points = self.tag_corners.get(int(marker_id))
@@ -131,18 +152,20 @@ class ScaledOrbNode(Node):
             if ok:
                 cv2.fillConvexPoly(distance_mask, marker_corners[0].astype(np.int32), float(np.linalg.norm(tvec)))
 
-        # tracked features: [u, v, x, y, z], with pixels in the downsampled slam frame
+        # get tracked features in the 2D input image
         features = np.array(self.slam.get_tracked_features(), dtype=np.float64)
         if features.size == 0:
             return
         height, width = distance_mask.shape
         xs = np.clip(np.round(features[:, 0] / self.image_scale).astype(int), 0, width - 1)
         ys = np.clip(np.round(features[:, 1] / self.image_scale).astype(int), 0, height - 1)
+
+        # calculate ratio of aruco and orbslam distances for all features within aruco masks
         metric_distances = distance_mask[ys, xs]
         on_tag = metric_distances > 0
         if not on_tag.any():
             return
-
+            
         camera_position = np.array(trajectory[-1][4::4])
         slam_distances = np.linalg.norm(features[on_tag, 2:5] - camera_position, axis=1)
         ratio = np.mean(metric_distances[on_tag] / slam_distances)
@@ -150,13 +173,18 @@ class ScaledOrbNode(Node):
             return
 
         self.scale_samples += 1
-        self.scale += (ratio - self.scale) / self.scale_samples
+        delta = ratio - self.scale
+        self.scale += delta / self.scale_samples
+        self.scale_m2 += delta * (ratio - self.scale)
+
+        error = self.scale_relative_error()
+        if self.scale_samples >= self.scale_min_samples and error < self.scale_tolerance:
+            self.scale_converged = True
+            self.get_logger().info(
+                f'scale converged to {self.scale:.4f} (±{100 * error:.2f}%) after {self.scale_samples} samples')
 
     def publish_trajectory(self, header, trajectory):
-        """Publish the scaled trajectory in the ROS frame, shifted so it starts at the origin.
-
-        Returns the shift applied (None for an empty trajectory) so the point cloud can match it.
-        """
+        """Publish orbslam map using current origin"""
         path_msg = Path(header=header)
         if not trajectory:
             self.trajectory_publisher.publish(path_msg)
@@ -182,11 +210,7 @@ class ScaledOrbNode(Node):
         return origin_offset
 
     def publish_pointcloud(self, header, origin_offset):
-        """Publish the whole slam map, transformed exactly like the trajectory.
-
-        The map is large, so it is republished at a lower rate than the camera. Until a tag
-        has been seen the scale is 1 and the points have no metric size.
-        """
+        """Publish the slam map aligned with current orbslam origin"""
         now = time.monotonic()
         if now - self.last_pointcloud_time < self.pointcloud_period:
             return

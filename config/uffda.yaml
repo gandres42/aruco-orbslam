@@ -25,6 +25,12 @@ Aruco.tags:
   - { id: 17, size: 0.075 }
   - { id: 18, size: 0.05 }
 
+# SCALE RECOVERY --------------------------------------------------------------
+# Scale estimation stops once at least minSamples frames have been averaged and the standard error of the
+# mean is below tolerance (as a fraction of the scale). It restarts if orb-slam starts a new map.
+Scale.minSamples: 30
+Scale.tolerance: 0.01
+
 # Required keyframe observations before a point is published
 PointCloud.minObservations: 6
 
