@@ -1,7 +1,7 @@
 from ament_index_python.packages import get_package_share_directory
+from enum import Enum, auto
 from rclpy.executors import ExternalShutdownException
 from scipy.spatial.transform import Rotation as R # pyrefly: ignore[untyped-import]
-import cv2 # pyrefly: ignore [missing-import]
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Image, PointCloud2
 from sensor_msgs_py import point_cloud2
@@ -13,14 +13,21 @@ import numpy as np
 import orbslam3
 import rclpy
 import time
+import cv2
 import os
-
 
 CV_TO_ROS = np.array([
     [0.0, 0.0, 1.0],
     [-1.0, 0.0, 0.0],
     [0.0, -1.0, 0.0],
 ])
+
+
+class State(Enum):
+    SINED = 0 # scale not recovered
+    SEELED = 1
+    DELIVERED = 2 # scale recovered
+
 
 class ScaledOrbNode(Node):
     def __init__(self):
@@ -44,7 +51,6 @@ class ScaledOrbNode(Node):
             fs.getNode('Correction.pitch').real(),
             fs.getNode('Correction.yaw').real(),
         ], degrees=True).as_matrix()
-        self.scale_window_size = int(fs.getNode('Scale.windowSize').real())
         image_scale = fs.getNode('Camera.imageScale')
         self.image_scale = image_scale.real() if not image_scale.empty() else 1.0
         self.pointcloud_min_observations = int(fs.getNode('PointCloud.minObservations').real())
@@ -56,8 +62,10 @@ class ScaledOrbNode(Node):
         self.slam = orbslam3.System(fs.getNode('ORB.vocabulary').string(), settings_file, orbslam3.Sensor.MONOCULAR)
         self.slam.set_use_viewer(fs.getNode('Viewer.UseViewer').string() == "True")
         self.slam.initialize()
-        self.rolling_scale_window = []
-        self.rolling_scale_estimate = 0
+
+        self.avg_estimate = 1
+        self.avg_estimate_count = 0
+
         self.map_start = None
 
         # aruco params
@@ -73,99 +81,94 @@ class ScaledOrbNode(Node):
                 [-half, -half, 0.0],
             ], dtype=np.float32)
 
+        # scale recovery state
+        self.scale_recovery_state: State = State.SINED
+
         # pub, sub, blub blub
         self.cam_sub = self.create_subscription(Image, fs.getNode('Topics.video').string(), self.camera_cb, 1)
-        self.annotated_publisher = self.create_publisher(Image, fs.getNode('Topics.annotated').string(), 1)
         self.trajectory_publisher = self.create_publisher(Path, fs.getNode('Topics.trajectory').string(), 1)
         self.pointcloud_publisher = self.create_publisher(PointCloud2, fs.getNode('Topics.pointcloud').string(), 1)
         fs.release()
 
 
     def camera_cb(self, msg: Image):
-        bgr = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
-
-        # ARUCO PROCESSING
-        annotated_aruco = bgr.copy()
-        corners, ids, _ = self.detector.detectMarkers(bgr)
-        markers = {}
-        if ids is not None:
-            cv2.aruco.drawDetectedMarkers(annotated_aruco, corners, ids)
-            for marker_corners, marker_id in zip(corners, ids.flatten()):
-                ok, rvec, tvec = cv2.solvePnP(self.object_points[str(marker_id)], marker_corners[0], self.camera_matrix, self.dist_coeffs)
-                if not ok:
-                    continue
-                
-                # get distance to marker center
-                distance = float(np.linalg.norm(tvec))
-
-                # create marker mask, valid points have distance instead of 0
-                mask = np.zeros(bgr.shape[:2], dtype=np.float32)
-                cv2.fillConvexPoly(mask, marker_corners[0].astype(np.int32), distance)
-
-                # annotate image to publish
-                cv2.drawFrameAxes(annotated_aruco, self.camera_matrix, self.dist_coeffs, rvec, tvec, 0.1 / 2.0)
-                # corners are ordered top-left, top-right, bottom-right, bottom-left
-                top_right = marker_corners[0][1]
-                text_pos = (int(top_right[0]) + 5, int(top_right[1]) - 5)
-                cv2.putText(annotated_aruco, f'{distance:.2f}m', text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
-
-                # save it all for later
-                markers[str(marker_id)] = mask
+        orginal_resolution_frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
 
         # ORB PROCESSING
         # orb-slam3 only scales its calibration by Camera.imageScale, it does not resize the frames
-        slam_frame = bgr
+        downsampled_frame = orginal_resolution_frame
         if self.image_scale != 1.0:
-            slam_frame = cv2.resize(bgr, None, fx=self.image_scale, fy=self.image_scale, interpolation=cv2.INTER_AREA)
-        self.slam.process_image_mono(slam_frame, time.monotonic())
+            downsampled_frame = cv2.resize(orginal_resolution_frame, None, fx=self.image_scale, fy=self.image_scale, interpolation=cv2.INTER_AREA)
+        self.slam.process_image_mono(downsampled_frame, time.monotonic())
 
-        # get tracked orb features in 2D and 3D
-        features = np.array(self.slam.get_tracked_features(), dtype=np.float64)
-        if features.size:
-            # feature pixels are in the resized frame, scale them back up to index the full resolution marker masks
-            tracked_pixels_2d = features[:, 0:2] / self.image_scale
-            tracked_points_3d = features[:, 2:5]
-        else:
-            tracked_pixels_2d = np.empty((0, 2))
-            tracked_points_3d = np.empty((0, 3))
+        # SCALE RECOVERY ------------------------------------------------------
+        # estimate monocular scale if not recovered yet
+        if self.scale_recovery_state != State.DELIVERED:
+            # IDENTIFY ARUCO TAGS
+            corners, ids, _ = self.detector.detectMarkers(orginal_resolution_frame)
+            markers = {}
+            if ids is not None:
+                for marker_corners, marker_id in zip(corners, ids.flatten()):
+                    ok, rvec, tvec = cv2.solvePnP(self.object_points[str(marker_id)], marker_corners[0], self.camera_matrix, self.dist_coeffs)
+                    if not ok:
+                        continue
+                    
+                    # get distance to marker center
+                    distance = float(np.linalg.norm(tvec))
 
-        # current camera position is the translation of the latest trajectory pose
-        trajectory = self.slam.get_trajectory_points()
-        current_position = np.array(trajectory[-1][4::4]) if trajectory else None
+                    # create marker mask, valid points have distance instead of 0
+                    mask = np.zeros(orginal_resolution_frame.shape[:2], dtype=np.float32)
+                    cv2.fillConvexPoly(mask, marker_corners[0].astype(np.int32), distance)
 
-        # orb-slam3 starts a new map (with its own scale) after losing track and later merges maps,
-        # and the trajectory only covers the active map, so a new first pose means the old scale is stale
-        map_start = trajectory[0][0] if trajectory else None
-        if map_start != self.map_start:
-            self.rolling_scale_window.clear()
-            self.map_start = map_start
+                    # save it all for later
+                    markers[str(marker_id)] = mask
 
-        # marker masks don't overlap, so taking the max keeps each marker's own distance value intact
-        combined_mask = np.zeros(bgr.shape[:2], dtype=np.float32)
-        for marker_mask in markers.values():
-            combined_mask = np.maximum(combined_mask, marker_mask)
+            # IDENTIFY TRACKED FEATURES OVERLAPPING TAGS
+            # get tracked orb features in 2D and 3D
+            features = np.array(self.slam.get_tracked_features(), dtype=np.float64)
+            if features.size:
+                # feature pixels are in the resized frame, scale them back up to index the full resolution marker masks
+                tracked_pixels_2d = features[:, 0:2] / self.image_scale
+                tracked_points_3d = features[:, 2:5]
+            else:
+                tracked_pixels_2d = np.empty((0, 2))
+                tracked_points_3d = np.empty((0, 3))
 
-        xs = np.round(tracked_pixels_2d[:, 0]).astype(int)
-        ys = np.round(tracked_pixels_2d[:, 1]).astype(int)
-        metric_distances = combined_mask[ys, xs]
-        marker_bool_mask = metric_distances != 0
+            # current camera position is the translation of the latest trajectory pose
+            trajectory = self.slam.get_trajectory_points()
+            current_position = np.array(trajectory[-1][4::4]) if trajectory else None
 
-        slam_distances = np.zeros(len(tracked_pixels_2d))
-        if current_position is not None:
-            slam_distances[marker_bool_mask] = np.linalg.norm(tracked_points_3d[marker_bool_mask] - current_position, axis=1)
+            # reset starting pose and scale estimate if SLAM restarts
+            map_start = trajectory[0][0] if trajectory else None
+            if map_start != self.map_start:
+                self.avg_estimate_count = 0
+                self.avg_estimate = 1
+                self.map_start = map_start
 
-        # get the average difference between metric distances and slam distances and print it
-        if current_position is not None and marker_bool_mask.any():
-            avg_ratio = np.mean(metric_distances[marker_bool_mask] / slam_distances[marker_bool_mask])
-            self.rolling_scale_window.append(avg_ratio)
-            if len(self.rolling_scale_window) > self.scale_window_size:
-                self.rolling_scale_window.pop(0)
-        self.rolling_scale_estimate = np.mean(self.rolling_scale_window)
+            combined_mask = np.zeros(orginal_resolution_frame.shape[:2], dtype=np.float32)
+            for marker_mask in markers.values():
+                combined_mask = np.maximum(combined_mask, marker_mask)
 
-        # for x, y in tracked_pixels_2d[marker_bool_mask]:
-        #     cv2.circle(annotated_aruco, (int(round(x)), int(round(y))), 3, (0, 255, 0), -1)
+            xs = np.round(tracked_pixels_2d[:, 0]).astype(int)
+            ys = np.round(tracked_pixels_2d[:, 1]).astype(int)
+            metric_distances = combined_mask[ys, xs]
+            marker_bool_mask = metric_distances != 0
 
-        # PUBLISH TRAJECTORY
+            # COMPARE FEATURE DISTANCES
+            slam_distances = np.zeros(len(tracked_pixels_2d))
+            if current_position is not None:
+                slam_distances[marker_bool_mask] = np.linalg.norm(tracked_points_3d[marker_bool_mask] - current_position, axis=1)
+
+            # get the average difference between metric distances and slam distances and print it
+            if current_position is not None and marker_bool_mask.any():
+                avg_ratio = np.mean(metric_distances[marker_bool_mask] / slam_distances[marker_bool_mask])
+                
+                self.avg_estimate = (self.avg_estimate * self.avg_estimate_count + avg_ratio) / (self.avg_estimate_count + 1)
+                self.avg_estimate_count += 1
+
+                print(f"{avg_ratio} - {self.avg_estimate}")
+
+        # PUBLISH TRAJECTORY --------------------------------------------------
         # get the current trajectory from orbslam and scale it by self.rolling_scale_estimate
         path_msg = Path()
         path_msg.header.stamp = msg.header.stamp
@@ -173,7 +176,7 @@ class ScaledOrbNode(Node):
         origin_offset = None
         for _, r00, r01, r02, tx, r10, r11, r12, ty, r20, r21, r22, tz in trajectory:
             rotation_matrix = np.array([[r00, r01, r02], [r10, r11, r12], [r20, r21, r22]])
-            translation = np.array([tx, ty, tz]) * self.rolling_scale_estimate
+            translation = np.array([tx, ty, tz]) * self.avg_estimate
 
             # both the world and camera axes are in CV convention, so the same
             # change-of-basis rotation is applied on both sides of the pose
@@ -215,14 +218,19 @@ class ScaledOrbNode(Node):
         # this is the whole map rather than just the points tracked in this frame, so it is republished
         # at a lower rate than the camera
         now = time.monotonic()
-        if origin_offset is not None and np.isfinite(self.rolling_scale_estimate) and now - self.last_pointcloud_time >= self.pointcloud_period:
+        if origin_offset is not None and np.isfinite(self.avg_estimate) and now - self.last_pointcloud_time >= self.pointcloud_period:
             self.last_pointcloud_time = now
             map_points = np.array(self.slam.get_map_points(self.pointcloud_min_observations), dtype=np.float64).reshape(-1, 3)
             cloud = o3d.geometry.PointCloud()
             cloud.points = o3d.utility.Vector3dVector(map_points)
+            
+            # cloud outlier removal
+            # cl, ind = cloud.remove_statistical_outlier(nb_neighbors=100, std_ratio=1.0)
+            # cl, ind = cloud.remove_radius_outlier(nb_points=16, radius=0.05)
+            # cloud = cloud.select_by_index(ind)
 
             # the path scales translations about the slam world origin, so scale the points about it too
-            cloud.scale(self.rolling_scale_estimate, center=np.zeros(3))
+            cloud.scale(self.avg_estimate, center=np.zeros(3))
 
             # same change of basis, camera correction and origin shift that the path poses go through
             cv_to_ros = np.eye(4)
@@ -232,12 +240,6 @@ class ScaledOrbNode(Node):
             cloud.transform(world_to_ros)
 
             self.pointcloud_publisher.publish(point_cloud2.create_cloud_xyz32(path_msg.header, np.asarray(cloud.points, dtype=np.float32)))
-
-        # DEBUG IMAGE
-        # cv2.putText(annotated_aruco, f'{self.rolling_scale_estimate:.2f}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
-        # annotated_out_msg = self.bridge.cv2_to_imgmsg(annotated_aruco, 'bgr8')
-        # annotated_out_msg.header = msg.header
-        # self.annotated_publisher.publish(annotated_out_msg)
 
 
 def main(args=None):

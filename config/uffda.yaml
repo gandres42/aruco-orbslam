@@ -26,14 +26,14 @@ Aruco.tags:
   - { id: 18, size: 0.05 }
 
 # number of frames averaged for the rolling scale estimate
-Scale.windowSize: 30
+Scale.windowSize: 50
 
 # Published map point cloud. New points start with 2 observations and orb-slam culls the ones that
 # are not matched again within a few keyframes, so requiring 3 keeps only points that have settled in
-PointCloud.minObservations: 3
+PointCloud.minObservations: 10
 
 # how often (Hz) the whole map is republished
-PointCloud.rate: 1.0
+PointCloud.rate: 10.0
 
 # Camera body rotation
 Correction.roll: 0.0
@@ -79,7 +79,7 @@ ORBextractor.iniThFAST: 20
 ORBextractor.minThFAST: 12
 
 # Viewer (only used when Viewer.UseViewer is True)
-Viewer.UseViewer: True
+Viewer.UseViewer: False
 Viewer.KeyFrameSize: 0.05
 Viewer.KeyFrameLineWidth: 1
 Viewer.GraphLineWidth: 0.9
