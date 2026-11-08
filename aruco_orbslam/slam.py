@@ -15,13 +15,20 @@ from rclpy.executors import ExternalShutdownException
 from ament_index_python.packages import get_package_share_directory
 from scipy.spatial.transform import Rotation as R  # pyrefly: ignore[untyped-import]
 
-# change of basis from the OpenCV camera convention (x right, y down, z forward) to ROS (x forward, y left, z up)
+# change of basis from the OpenCV camera body convention (x right, y down, z forward) to ROS (x forward, y left, z up)
 CV_TO_ROS = np.array([
     [0.0, 0.0, 1.0],
     [-1.0, 0.0, 0.0],
     [0.0, -1.0, 0.0],
 ])
 
+# change of basis from the aruco tag convention (x right, y up the marker, z out of its face) to ROS
+# (x out of the face, y to the tag's left, z up the marker)
+ARUCO_TO_ROS = np.array([
+    [0.0, 0.0, 1.0],
+    [1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+])
 
 class ScaledOrbNode(Node):
     def __init__(self):
@@ -47,10 +54,6 @@ class ScaledOrbNode(Node):
         self.dist_coeffs = np.array([real(k) for k in ('Camera.k1', 'Camera.k2', 'Camera.p1', 'Camera.p2', 'Camera.k3')])
         self.image_scale = real('Camera.imageScale') if not fs.getNode('Camera.imageScale').empty() else 1.0
 
-        # slam world (CV convention) -> ROS world, including the camera's mounting rotation
-        correction = R.from_euler('xyz', [real('Correction.roll'), real('Correction.pitch'), real('Correction.yaw')], degrees=True)
-        self.world_to_ros = correction.as_matrix() @ CV_TO_ROS
-
         # point cloud
         self.pointcloud_min_observations = int(real('PointCloud.minObservations'))
         self.pointcloud_period = 1.0 / real('PointCloud.rate')
@@ -69,6 +72,20 @@ class ScaledOrbNode(Node):
                 [half, -half, 0.0],
                 [-half, -half, 0.0],
             ], dtype=np.float32)
+
+        # anchor tag: once seen, published poses and points are moved so this tag sits at its configured pose
+        anchor_node = fs.getNode('Anchor.id')
+        self.anchor_id = None if anchor_node.empty() else int(anchor_node.real())
+        if self.anchor_id is not None and self.anchor_id < 0:
+            self.anchor_id = None
+        if self.anchor_id is not None and self.anchor_id not in self.tag_corners:
+            self.get_logger().warn(f'anchor tag {self.anchor_id} has no size in Aruco.tags, anchoring disabled')
+            self.anchor_id = None
+        self.anchor_position = np.array([real('Anchor.px'), real('Anchor.py'), real('Anchor.pz')])
+        self.anchor_rotation = R.from_euler('xyz', [real('Anchor.rx'), real('Anchor.ry'), real('Anchor.rz')], degrees=True).as_matrix()
+        observations_node = fs.getNode('Anchor.observations')
+        self.anchor_min_observations = 1 if observations_node.empty() else max(1, int(observations_node.real()))
+        self.anchor_observations = []
 
         # orb-slam3
         self.slam = orbslam3.System(string('ORB.vocabulary'), settings_file, orbslam3.Sensor.MONOCULAR)
@@ -96,22 +113,60 @@ class ScaledOrbNode(Node):
         slam_frame = frame
         if self.image_scale != 1.0:
             slam_frame = cv2.resize(frame, None, fx=self.image_scale, fy=self.image_scale, interpolation=cv2.INTER_AREA) # pyrefly: ignore[bad-argument-type]
-        self.slam.process_image_mono(slam_frame, time.monotonic())
+        timestamp = time.monotonic()
+        tracked = self.slam.process_image_mono(slam_frame, timestamp)
 
-        # get SLAM trajectory, cols = timestamp, 4x4 pose matrix
+        # get SLAM trajectory, cols = timestamp, 3x4 camera-to-world pose matrix
         trajectory = self.slam.get_trajectory_points()
+        self.check_map_reset(trajectory)
 
-        # update scale estimate
-        self.update_scale(frame, trajectory)
+        # the latest trajectory entry is only this frame's pose if this frame was localized
+        localized = tracked and bool(trajectory) and trajectory[-1][0] == timestamp
+
+        # detect known tags only while something still needs them
+        detections = {}
+        if trajectory and (not self.scale_converged or self.anchor_pending()):
+            detections = self.detect_tags(frame)
+
+        # update scale estimate and look for the anchor tag
+        self.update_scale(frame, detections, trajectory)
+        if localized:
+            self.update_anchor(detections, trajectory[-1])
 
         # publish SLAM pointcloud and trajectory
         header = Header(stamp=msg.header.stamp, frame_id=self.frame_id)
-        origin_offset = self.publish_trajectory(header, trajectory)
-        if origin_offset is not None:
-            self.publish_pointcloud(header, origin_offset)
+        alignment = self.publish_trajectory(header, trajectory)
+        if alignment is not None:
+            self.publish_pointcloud(header, *alignment)
 
         # publish current scale estimate
         self.publish_scale()
+
+    def check_map_reset(self, trajectory):
+        """detect orbslam restarts by a change of first frame, scale and anchor belong to the old map"""
+        map_start = trajectory[0][0] if trajectory else None
+        if map_start == self.map_start:
+            return
+        if self.scale_samples or self.anchor_observations:
+            self.get_logger().info('slam map reset, restarting scale estimation and anchor search')
+        self.map_start = map_start
+        self.reset_scale()
+        self.anchor_observations = []
+
+    def detect_tags(self, frame):
+        """pose of every visible known tag in the camera frame (CV convention, metres), keyed by tag id"""
+        corners, ids, _ = self.detector.detectMarkers(frame)
+        detections = {}
+        if ids is None:
+            return detections
+        for marker_corners, marker_id in zip(corners, ids.flatten()):
+            object_points = self.tag_corners.get(int(marker_id))
+            if object_points is None:
+                continue
+            ok, rvec, tvec = cv2.solvePnP(object_points, marker_corners[0], self.camera_matrix, self.dist_coeffs, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+            if ok:
+                detections[int(marker_id)] = (marker_corners[0], rvec.reshape(3), tvec.reshape(3))
+        return detections
 
     def reset_scale(self):
         self.scale = 1.0
@@ -126,33 +181,15 @@ class ScaledOrbNode(Node):
         variance = self.scale_m2 / (self.scale_samples - 1)
         return np.sqrt(variance / self.scale_samples) / self.scale
 
-    def update_scale(self, frame, trajectory):
+    def update_scale(self, frame, detections, trajectory):
         """update scale estimate using known aruco tag sizes"""
-
-        # check if first keyframe has changed to identify orbslam restarts
-        map_start = trajectory[0][0] if trajectory else None
-        if map_start != self.map_start:
-            if self.scale_samples:
-                self.get_logger().info('slam map reset, restarting scale estimation')
-            self.map_start = map_start
-            self.reset_scale()
-        if not trajectory or self.scale_converged:
-            return
-
-        # detect known markers
-        corners, ids, _ = self.detector.detectMarkers(frame)
-        if ids is None:
+        if not trajectory or self.scale_converged or not detections:
             return
 
         # calculate image mask where detected tags hold their estimated distance using known sizes
         distance_mask = np.zeros(frame.shape[:2], dtype=np.float32)
-        for marker_corners, marker_id in zip(corners, ids.flatten()):
-            object_points = self.tag_corners.get(int(marker_id))
-            if object_points is None:
-                continue
-            ok, _, tvec = cv2.solvePnP(object_points, marker_corners[0], self.camera_matrix, self.dist_coeffs)
-            if ok:
-                cv2.fillConvexPoly(distance_mask, marker_corners[0].astype(np.int32), float(np.linalg.norm(tvec))) # pyrefly: ignore[bad-argument-type]
+        for marker_corners, _, tvec in detections.values():
+            cv2.fillConvexPoly(distance_mask, marker_corners.astype(np.int32), float(np.linalg.norm(tvec))) # pyrefly: ignore[bad-argument-type]
 
         # get tracked features in the 2D input image
         features = np.array(self.slam.get_tracked_features(), dtype=np.float64)
@@ -184,19 +221,62 @@ class ScaledOrbNode(Node):
             self.scale_converged = True
             self.get_logger().info(f'scale converged to {self.scale:.4f} (±{100 * error:.2f}%) after {self.scale_samples} samples')
 
+    def anchor_pending(self):
+        return self.anchor_id is not None and len(self.anchor_observations) < self.anchor_min_observations
+
+    def update_anchor(self, detections, current_pose):
+        """collect the first Anchor.observations sightings of the anchor tag from localized frames"""
+        if not self.anchor_pending() or self.anchor_id not in detections:
+            return
+        _, rvec, tvec = detections[self.anchor_id]
+        # keep the frame's timestamp so its pose can be looked up again after bundle adjustment / loop closure,
+        # and the tag offset in metres so the anchor follows the scale estimate as it converges
+        self.anchor_observations.append({
+            'timestamp': current_pose[0],
+            'camera_pose': np.asarray(current_pose[1:], dtype=np.float64).reshape(3, 4),
+            'tag_rotation': cv2.Rodrigues(rvec)[0] @ ARUCO_TO_ROS.T,
+            'tag_translation': tvec.astype(np.float64),
+        })
+        if not self.anchor_pending():
+            self.get_logger().info(f'anchor tag {self.anchor_id} averaged over {len(self.anchor_observations)} observations, aligning output to it')
+
+    def anchor_tag_pose(self, timestamps, poses):
+        """averaged anchor tag pose (rotation, position) in the scaled slam world"""
+        rotations, positions = [], []
+        for observation in self.anchor_observations:
+            # camera pose when the anchor was seen, refined by orbslam if that frame is still in the trajectory
+            match = np.flatnonzero(timestamps == observation['timestamp'])
+            camera_pose = poses[match[-1]] if match.size else observation['camera_pose']
+            camera_rotation, camera_position = camera_pose[:, :3], camera_pose[:, 3]
+            rotations.append(camera_rotation @ observation['tag_rotation'])
+            positions.append(self.scale * camera_position + camera_rotation @ observation['tag_translation'])
+        return R.from_matrix(np.array(rotations)).mean().as_matrix(), np.mean(positions, axis=0)
+
+    def alignment(self, timestamps, poses):
+        """rotation and translation taking scaled slam world points to the published frame"""
+        if self.anchor_id is None or self.anchor_pending():
+            # no anchor yet: slam world axes, origin at the first frame
+            return np.eye(3), -self.scale * poses[0, :, 3]
+
+        # move the tag onto its configured pose: T_out = T_anchor * inv(T_tag)
+        tag_rotation, tag_position = self.anchor_tag_pose(timestamps, poses)
+        rotation = self.anchor_rotation @ tag_rotation.T
+        return rotation, self.anchor_position - rotation @ tag_position
+
     def publish_trajectory(self, header, trajectory):
-        """Publish orbslam map using current origin"""
+        """Publish orbslam trajectory in the published frame, returns that frame's alignment"""
         path_msg = Path(header=header)
         if not trajectory:
             self.trajectory_publisher.publish(path_msg)
             return None
 
-        poses = np.asarray(trajectory, dtype=np.float64)[:, 1:].reshape(-1, 3, 4)
-        # the world and camera axes are both in CV convention, so the change of basis applies on both sides
-        rotations = self.world_to_ros @ poses[:, :, :3] @ CV_TO_ROS.T
-        translations = self.scale * poses[:, :, 3] @ self.world_to_ros.T
-        origin_offset = translations[0].copy()
-        translations -= origin_offset
+        trajectory = np.asarray(trajectory, dtype=np.float64)
+        timestamps = trajectory[:, 0]
+        poses = trajectory[:, 1:].reshape(-1, 3, 4)
+        world_rotation, world_translation = self.alignment(timestamps, poses)
+        # align the world side, and switch the camera body axes from CV to ROS convention
+        rotations = world_rotation @ poses[:, :, :3] @ CV_TO_ROS.T
+        translations = self.scale * poses[:, :, 3] @ world_rotation.T + world_translation
         quaternions = R.from_matrix(rotations).as_quat()  # x, y, z, w
 
         for (x, y, z), (qx, qy, qz, qw) in zip(translations, quaternions):
@@ -208,17 +288,17 @@ class ScaledOrbNode(Node):
             path_msg.poses.append(pose)
 
         self.trajectory_publisher.publish(path_msg)
-        return origin_offset
+        return world_rotation, world_translation
 
-    def publish_pointcloud(self, header, origin_offset):
-        """Publish the slam map aligned with current orbslam origin"""
+    def publish_pointcloud(self, header, world_rotation, world_translation):
+        """Publish the slam map in the same frame as the trajectory"""
         now = time.monotonic()
         if now - self.last_pointcloud_time < self.pointcloud_period:
             return
         self.last_pointcloud_time = now
 
         points = np.array(self.slam.get_map_points(self.pointcloud_min_observations), dtype=np.float64).reshape(-1, 3)
-        points = self.scale * points @ self.world_to_ros.T - origin_offset
+        points = self.scale * points @ world_rotation.T + world_translation
         self.pointcloud_publisher.publish(point_cloud2.create_cloud_xyz32(header, points.astype(np.float32)))
 
     def publish_scale(self):

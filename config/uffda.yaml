@@ -26,22 +26,34 @@ Aruco.tags:
   - { id: 17, size: 0.075 }
   - { id: 18, size: 0.05 }
 
+# ARUCO ANCHOR ----------------------------------------------------------------
+# anchor tag id (must be listed in Aruco.tags, remove or set negative to disable)
+Anchor.id: 14
+
+# number of anchor sightings (one per tracked frame) averaged before the output is aligned
+Anchor.observations: 10
+
+# pose of the anchor tag's center in the published frame: position in metres and
+# xyz euler angles in degrees. The tag frame follows ROS: x out of its face, y to
+# the tag's left, z up along the printed marker. All zeros is a tag standing upright
+# facing +x; Anchor.ry: -90.0 lays it face up.
+Anchor.px: 0.0
+Anchor.py: 0.0
+Anchor.pz: 0.0
+Anchor.rx: 0.0
+Anchor.ry: 0.0
+Anchor.rz: 0.0
+
 # SCALE RECOVERY --------------------------------------------------------------
-# Scale estimation stops once at least minSamples frames have been averaged and the standard error of the
-# mean is below tolerance (as a fraction of the scale). It restarts if orb-slam starts a new map.
+# stop scale estimation once minimum samples and tolerance are met
 Scale.minSamples: 30
-Scale.tolerance: 0.01
+Scale.tolerance: 0.005
 
 # Required keyframe observations before a point is published
 PointCloud.minObservations: 6
 
 # how often (Hz) the whole pointcloud is republished
 PointCloud.rate: 24.0
-
-# Camera body rotation
-Correction.roll: 0.0
-Correction.pitch: 8.0
-Correction.yaw: 0.0
 
 # ORBSLAM ---------------------------------------------------------------------
 # Camera model
