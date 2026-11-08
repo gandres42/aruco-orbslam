@@ -34,8 +34,10 @@ Aruco.tags:
 # anchor tag id (must be listed in Aruco.tags, remove or set negative to disable)
 Anchor.id: 14
 
-# number of anchor sightings (one per tracked frame) averaged before the output is aligned
-Anchor.observations: 50
+# the anchor pose is averaged over the most recent Anchor.history sightings (one per
+# tracked frame), path and map are published once there are Anchor.observations
+Anchor.observations: 45
+Anchor.history: 1000
 
 # pose of the anchor tag's center in the published frame
 Anchor.px: 0.0
@@ -46,12 +48,12 @@ Anchor.ry: 0.0
 Anchor.rz: 0.0
 
 # SCALE RECOVERY --------------------------------------------------------------
-# stop scale estimation once minimum samples and tolerance are met
-Scale.minSamples: 30
-Scale.tolerance: 0.005
+# scale is the median of the most recent Scale.history samples (one per tracked frame
+# with tracked features on a known tag)
+Scale.history: 1000
 
 # Required keyframe observations before a point is published
-PointCloud.minObservations: 6
+PointCloud.minObservations: 10
 
 # how often (Hz) the whole pointcloud is republished
 PointCloud.rate: 24.0
