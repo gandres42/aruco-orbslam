@@ -8,7 +8,6 @@ from collections import deque
 from rclpy.node import Node
 from nav_msgs.msg import Path
 from cv_bridge import CvBridge
-from std_srvs.srv import Trigger
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header, Float32
 from sensor_msgs.msg import Image, PointCloud2
@@ -99,8 +98,6 @@ class ScaledOrbNode(Node):
         self.trajectory_publisher = self.create_publisher(Path, string('Topics.trajectory'), 1)
         self.pointcloud_publisher = self.create_publisher(PointCloud2, string('Topics.pointcloud'), 1)
         self.scale_publisher = self.create_publisher(Float32, string('Topics.scale'), 1)
-        self.reanchor_service = self.create_service(Trigger, string('Services.reanchor'), self.reanchor_cb)
-        self.rescale_service = self.create_service(Trigger, string('Services.rescale'), self.rescale_cb)
         fs.release()
 
     def camera_cb(self, msg: Image):
@@ -146,26 +143,6 @@ class ScaledOrbNode(Node):
         self.scale = 1.0
         self.scale_samples.clear()
         self.anchor_samples.clear()
-
-    def reanchor_cb(self, request, response):
-        """drop the anchor history, path and map are not published until there are enough new sightings"""
-        if self.anchor_id is None:
-            response.success = False
-            response.message = 'anchoring is disabled'
-            return response
-        self.anchor_samples.clear()
-        response.success = True
-        response.message = f'publishing paused, collecting {self.anchor_min_observations} new sightings of anchor tag {self.anchor_id}'
-        self.get_logger().info(response.message)
-        return response
-
-    def rescale_cb(self, request, response):
-        """drop the scale history, the current scale stays in use until the first new sample"""
-        self.scale_samples.clear()
-        response.success = True
-        response.message = f'restarting scale estimation from {self.scale:.4f}'
-        self.get_logger().info(response.message)
-        return response
 
     def detect_tags(self, frame):
         """pose of every visible known tag in the camera frame (CV convention, metres), keyed by tag id"""

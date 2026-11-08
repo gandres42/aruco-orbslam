@@ -12,10 +12,6 @@ Topics.pointcloud: "/aruco/pointcloud"
 Topics.scale: "/aruco/scale"
 Topics.frameId: "map"
 
-# std_srvs/Trigger services that re-collect the anchor and restart scale estimation
-Services.reanchor: "/aruco/reanchor"
-Services.rescale: "/aruco/rescale"
-
 # ARUCO TAGS ------------------------------------------------------------------
 # Aruco dictionary
 Aruco.dictionary: "DICT_6X6_50"

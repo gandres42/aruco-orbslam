@@ -7,8 +7,6 @@
   <maintainer email="gandres2416@gmail.com">gandres42</maintainer>
   <license>TODO: License declaration</license>
 
-  <exec_depend>std_srvs</exec_depend>
-
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_mypy</test_depend>
