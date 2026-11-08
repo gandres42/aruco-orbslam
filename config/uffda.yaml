@@ -7,7 +7,9 @@ ORB.vocabulary: "/usr/local/share/ORB_SLAM3/Vocabulary/ORBvoc.txt"
 # Video topics
 Topics.video: "/BlueROV2/video"
 Topics.annotated: "/aruco/annotated"
-Topics.trajectory: "/reference_trajectory"
+Topics.trajectory: "/aruco/path"
+Topics.pointcloud: "/aruco/pointcloud"
+Topics.scale: "/aruco/scale"
 Topics.frameId: "map"
 
 # ARUCO TAGS ------------------------------------------------------------------
@@ -24,8 +26,17 @@ Aruco.tags:
   - { id: 17, size: 0.075 }
   - { id: 18, size: 0.05 }
 
-# number of frames averaged for the rolling scale estimate
-Scale.windowSize: 50
+# SCALE RECOVERY --------------------------------------------------------------
+# Scale estimation stops once at least minSamples frames have been averaged and the standard error of the
+# mean is below tolerance (as a fraction of the scale). It restarts if orb-slam starts a new map.
+Scale.minSamples: 30
+Scale.tolerance: 0.01
+
+# Required keyframe observations before a point is published
+PointCloud.minObservations: 6
+
+# how often (Hz) the whole pointcloud is republished
+PointCloud.rate: 24.0
 
 # Camera body rotation
 Correction.roll: 0.0
@@ -33,12 +44,11 @@ Correction.pitch: 8.0
 Correction.yaw: 0.0
 
 # ORBSLAM ---------------------------------------------------------------------
-# Camera model (required by ORB-SLAM3)
+# Camera model
 Camera.type: "PinHole"
 
-# Image size (required by the ORB-SLAM3 viewer)
-Camera.width: 1920
-Camera.height: 1080
+# Downsampling ratio for SLAM-only use
+Camera.imageScale: 0.5
 
 # Camera calibration and distortion
 Camera.fx: 1078.17559
@@ -59,14 +69,14 @@ Camera.fps: 24.0
 Camera.RGB: 0
 
 # ORB extractor
-ORBextractor.nFeatures: 1000
+ORBextractor.nFeatures: 2000
 ORBextractor.scaleFactor: 1.2
-ORBextractor.nLevels: 8
-ORBextractor.iniThFAST: 18
-ORBextractor.minThFAST: 16
+ORBextractor.nLevels: 12
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 12
 
 # Viewer (only used when Viewer.UseViewer is True)
-Viewer.UseViewer: True
+Viewer.UseViewer: False
 Viewer.KeyFrameSize: 0.05
 Viewer.KeyFrameLineWidth: 1
 Viewer.GraphLineWidth: 0.9

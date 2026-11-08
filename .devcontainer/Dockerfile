@@ -32,10 +32,12 @@ RUN apt-get install -y \
     clangd \
     jq \
     ssh \
-    libepoxy-dev
+    libepoxy-dev \
+    python3-scipy \
+    python3-open3d
 
 # install pangolin
-RUN cd /tmp && \
+RUN cd /usr/local/src && \
     git clone https://github.com/stevenlovegrove/Pangolin && \
     cd Pangolin && \
     mkdir build && \
@@ -45,7 +47,7 @@ RUN cd /tmp && \
     make install
 
 # install orb-slam3
-RUN cd /tmp && \
+RUN cd /usr/local/src && \
     git clone https://github.com/gandres42/ORB_SLAM3.git && \
     cd ORB_SLAM3 && \
     ./build.sh && \
@@ -53,8 +55,23 @@ RUN cd /tmp && \
     make install && \
     ldconfig
 
+# install orb-slam3 python bindings
+RUN cd /usr/local/src && \
+    git clone https://github.com/gandres42/ORB_SLAM-PythonBindings.git && \
+    cd ORB_SLAM-PythonBindings && \
+    git checkout orbslam3 && \
+    mkdir build && \
+    cd build && \
+    cmake .. && \
+    make install
+
+# create library stubs
+RUN pip install pybind11-stubgen opencv-stubs --break-system-packages
+RUN pybind11-stubgen -o $(python -c "import site; print(site.getsitepackages()[0])") --root-suffix "" open3d
+
 # dev environment setup
 RUN chsh -s /bin/bash $USERNAME
 USER $USERNAME
 RUN echo "source /home/$USERNAME/.dotfiles/setup.bash" >> ~/.bashrc
+RUN echo "umask 022" >> ~/.bashrc
 ENV CONTAINER_ID $CONTAINER_ID
