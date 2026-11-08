@@ -9,6 +9,7 @@ Topics.video: "/BlueROV2/video"
 Topics.annotated: "/aruco/annotated"
 Topics.trajectory: "/aruco/path"
 Topics.pointcloud: "/aruco/pointcloud"
+Topics.scale: "/aruco/scale"
 Topics.frameId: "map"
 
 # ARUCO TAGS ------------------------------------------------------------------

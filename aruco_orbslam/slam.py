@@ -1,20 +1,19 @@
 import os
-import time
-
 import cv2
-import numpy as np
-import orbslam3
+import time
 import rclpy
-from ament_index_python.packages import get_package_share_directory
-from cv_bridge import CvBridge
-from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Path
-from rclpy.executors import ExternalShutdownException
+import orbslam3
+import numpy as np
 from rclpy.node import Node
-from scipy.spatial.transform import Rotation as R  # pyrefly: ignore[untyped-import]
-from sensor_msgs.msg import Image, PointCloud2
+from nav_msgs.msg import Path
+from cv_bridge import CvBridge
 from sensor_msgs_py import point_cloud2
-from std_msgs.msg import Header
+from std_msgs.msg import Header, Float32
+from geometry_msgs.msg import PoseStamped
+from sensor_msgs.msg import Image, PointCloud2
+from rclpy.executors import ExternalShutdownException
+from ament_index_python.packages import get_package_share_directory
+from scipy.spatial.transform import Rotation as R  # pyrefly: ignore[untyped-import]
 
 # change of basis from the OpenCV camera convention (x right, y down, z forward) to ROS (x forward, y left, z up)
 CV_TO_ROS = np.array([
@@ -31,7 +30,7 @@ class ScaledOrbNode(Node):
 
         # node params live in the same settings file orb-slam3 uses
         settings_file = os.path.join(get_package_share_directory('aruco_orbslam'), 'config', 'uffda.yaml')
-        fs = cv2.FileStorage(settings_file, cv2.FILE_STORAGE_READ)
+        fs = cv2.FileStorage(settings_file, cv2.FILE_STORAGE_READ) # pyrefly: ignore[bad-argument-count]
 
         def real(key):
             return fs.getNode(key).real()
@@ -76,18 +75,18 @@ class ScaledOrbNode(Node):
         self.slam.set_use_viewer(string('Viewer.UseViewer') == 'True')
         self.slam.initialize()
 
-        # running mean and spread (welford) of the metric / slam scale ratio, reset whenever slam starts a new map.
-        # estimation stops once the mean's relative standard error drops below the tolerance
+        # running mean and spread (welford) of metric sclae
         self.scale_min_samples = int(real('Scale.minSamples'))
         self.scale_tolerance = real('Scale.tolerance')
         self.map_start = None
         self.reset_scale()
 
-        # ros interfaces
+        # pub sub blub blub
         self.frame_id = string('Topics.frameId')
         self.cam_sub = self.create_subscription(Image, string('Topics.video'), self.camera_cb, 1)
         self.trajectory_publisher = self.create_publisher(Path, string('Topics.trajectory'), 1)
         self.pointcloud_publisher = self.create_publisher(PointCloud2, string('Topics.pointcloud'), 1)
+        self.scale_publisher = self.create_publisher(Float32, string('Topics.scale'), 1)
         fs.release()
 
     def camera_cb(self, msg: Image):
@@ -110,6 +109,9 @@ class ScaledOrbNode(Node):
         origin_offset = self.publish_trajectory(header, trajectory)
         if origin_offset is not None:
             self.publish_pointcloud(header, origin_offset)
+
+        # publish current scale estimate
+        self.publish_scale()
 
     def reset_scale(self):
         self.scale = 1.0
@@ -180,8 +182,7 @@ class ScaledOrbNode(Node):
         error = self.scale_relative_error()
         if self.scale_samples >= self.scale_min_samples and error < self.scale_tolerance:
             self.scale_converged = True
-            self.get_logger().info(
-                f'scale converged to {self.scale:.4f} (±{100 * error:.2f}%) after {self.scale_samples} samples')
+            self.get_logger().info(f'scale converged to {self.scale:.4f} (±{100 * error:.2f}%) after {self.scale_samples} samples')
 
     def publish_trajectory(self, header, trajectory):
         """Publish orbslam map using current origin"""
@@ -220,6 +221,8 @@ class ScaledOrbNode(Node):
         points = self.scale * points @ self.world_to_ros.T - origin_offset
         self.pointcloud_publisher.publish(point_cloud2.create_cloud_xyz32(header, points.astype(np.float32)))
 
+    def publish_scale(self):
+        self.scale_publisher.publish(Float32(data=float(self.scale)))
 
 def main(args=None):
     rclpy.init(args=args)
