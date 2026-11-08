@@ -57,8 +57,8 @@ class ScaledOrbNode(Node):
         self.last_pointcloud_time = 0.0
 
         # aruco detector and each tag's corners in its own frame, keyed by tag id
-        dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, string('Aruco.dictionary')))
-        self.detector = cv2.aruco.ArucoDetector(dictionary, cv2.aruco.DetectorParameters())
+        dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, string('Aruco.dictionary'))) # pyrefly: ignore[missing-attribute]
+        self.detector = cv2.aruco.ArucoDetector(dictionary, cv2.aruco.DetectorParameters()) # pyrefly: ignore[missing-attribute]
         self.tag_corners = {}
         tags = fs.getNode('Aruco.tags')
         for i in range(tags.size()):
@@ -95,7 +95,7 @@ class ScaledOrbNode(Node):
         # update orbslam using downscaled image
         slam_frame = frame
         if self.image_scale != 1.0:
-            slam_frame = cv2.resize(frame, None, fx=self.image_scale, fy=self.image_scale, interpolation=cv2.INTER_AREA)
+            slam_frame = cv2.resize(frame, None, fx=self.image_scale, fy=self.image_scale, interpolation=cv2.INTER_AREA) # pyrefly: ignore[bad-argument-type]
         self.slam.process_image_mono(slam_frame, time.monotonic())
 
         # get SLAM trajectory, cols = timestamp, 4x4 pose matrix
@@ -152,7 +152,7 @@ class ScaledOrbNode(Node):
                 continue
             ok, _, tvec = cv2.solvePnP(object_points, marker_corners[0], self.camera_matrix, self.dist_coeffs)
             if ok:
-                cv2.fillConvexPoly(distance_mask, marker_corners[0].astype(np.int32), float(np.linalg.norm(tvec)))
+                cv2.fillConvexPoly(distance_mask, marker_corners[0].astype(np.int32), float(np.linalg.norm(tvec))) # pyrefly: ignore[bad-argument-type]
 
         # get tracked features in the 2D input image
         features = np.array(self.slam.get_tracked_features(), dtype=np.float64)
