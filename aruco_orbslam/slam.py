@@ -8,6 +8,7 @@ from rclpy.node import Node
 from nav_msgs.msg import Path
 from cv_bridge import CvBridge
 from sensor_msgs_py import point_cloud2
+from std_srvs.srv import Trigger
 from std_msgs.msg import Header, Float32
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Image, PointCloud2
@@ -85,7 +86,9 @@ class ScaledOrbNode(Node):
         self.anchor_rotation = R.from_euler('xyz', [real('Anchor.rx'), real('Anchor.ry'), real('Anchor.rz')], degrees=True).as_matrix()
         observations_node = fs.getNode('Anchor.observations')
         self.anchor_min_observations = 1 if observations_node.empty() else max(1, int(observations_node.real()))
-        self.anchor_observations = []
+        self.anchor_observations = None  # sightings the output is aligned to
+        self.anchor_samples = []  # sightings being collected
+        self.anchor_searching = self.anchor_id is not None
 
         # orb-slam3
         self.slam = orbslam3.System(string('ORB.vocabulary'), settings_file, orbslam3.Sensor.MONOCULAR)
@@ -104,6 +107,10 @@ class ScaledOrbNode(Node):
         self.trajectory_publisher = self.create_publisher(Path, string('Topics.trajectory'), 1)
         self.pointcloud_publisher = self.create_publisher(PointCloud2, string('Topics.pointcloud'), 1)
         self.scale_publisher = self.create_publisher(Float32, string('Topics.scale'), 1)
+        def service_name(key, default):
+            return default if fs.getNode(key).empty() else string(key)
+        self.reanchor_service = self.create_service(Trigger, service_name('Services.reanchor', '/aruco/reanchor'), self.reanchor_cb)
+        self.rescale_service = self.create_service(Trigger, service_name('Services.rescale', '/aruco/rescale'), self.rescale_cb)
         fs.release()
 
     def camera_cb(self, msg: Image):
@@ -133,11 +140,12 @@ class ScaledOrbNode(Node):
         if localized:
             self.update_anchor(detections, trajectory[-1])
 
-        # publish SLAM pointcloud and trajectory
-        header = Header(stamp=msg.header.stamp, frame_id=self.frame_id)
-        alignment = self.publish_trajectory(header, trajectory)
-        if alignment is not None:
-            self.publish_pointcloud(header, *alignment)
+        # publish SLAM pointcloud and trajectory, once anchored if anchoring is enabled
+        if self.anchor_id is None or self.anchor_observations is not None:
+            header = Header(stamp=msg.header.stamp, frame_id=self.frame_id)
+            alignment = self.publish_trajectory(header, trajectory)
+            if alignment is not None:
+                self.publish_pointcloud(header, *alignment)
 
         # publish current scale estimate
         self.publish_scale()
@@ -147,11 +155,35 @@ class ScaledOrbNode(Node):
         map_start = trajectory[0][0] if trajectory else None
         if map_start == self.map_start:
             return
-        if self.scale_samples or self.anchor_observations:
+        if self.scale_samples or self.anchor_observations or self.anchor_samples:
             self.get_logger().info('slam map reset, restarting scale estimation and anchor search')
         self.map_start = map_start
         self.reset_scale()
-        self.anchor_observations = []
+        self.anchor_observations = None
+        self.anchor_samples = []
+        self.anchor_searching = self.anchor_id is not None
+
+    def reanchor_cb(self, request, response):
+        """drop the current anchor and collect fresh sightings, path and map are not published until they are complete"""
+        if self.anchor_id is None:
+            response.success = False
+            response.message = 'anchoring is disabled'
+            return response
+        self.anchor_observations = None
+        self.anchor_samples = []
+        self.anchor_searching = True
+        response.success = True
+        response.message = f'publishing paused, collecting {self.anchor_min_observations} new sightings of anchor tag {self.anchor_id}'
+        self.get_logger().info(response.message)
+        return response
+
+    def rescale_cb(self, request, response):
+        """restart scale estimation, the current scale stays in use until the first new sample"""
+        self.reset_scale(keep_value=True)
+        response.success = True
+        response.message = f'restarting scale estimation from {self.scale:.4f}'
+        self.get_logger().info(response.message)
+        return response
 
     def detect_tags(self, frame):
         """pose of every visible known tag in the camera frame (CV convention, metres), keyed by tag id"""
@@ -168,8 +200,10 @@ class ScaledOrbNode(Node):
                 detections[int(marker_id)] = (marker_corners[0], rvec.reshape(3), tvec.reshape(3))
         return detections
 
-    def reset_scale(self):
-        self.scale = 1.0
+    def reset_scale(self, keep_value=False):
+        # the first new sample replaces the mean, so keeping the old value only matters until then
+        if not keep_value:
+            self.scale = 1.0
         self.scale_samples = 0
         self.scale_m2 = 0.0  # sum of squared differences from the mean
         self.scale_converged = False
@@ -222,7 +256,7 @@ class ScaledOrbNode(Node):
             self.get_logger().info(f'scale converged to {self.scale:.4f} (±{100 * error:.2f}%) after {self.scale_samples} samples')
 
     def anchor_pending(self):
-        return self.anchor_id is not None and len(self.anchor_observations) < self.anchor_min_observations
+        return self.anchor_searching
 
     def update_anchor(self, detections, current_pose):
         """collect the first Anchor.observations sightings of the anchor tag from localized frames"""
@@ -231,13 +265,15 @@ class ScaledOrbNode(Node):
         _, rvec, tvec = detections[self.anchor_id]
         # keep the frame's timestamp so its pose can be looked up again after bundle adjustment / loop closure,
         # and the tag offset in metres so the anchor follows the scale estimate as it converges
-        self.anchor_observations.append({
+        self.anchor_samples.append({
             'timestamp': current_pose[0],
             'camera_pose': np.asarray(current_pose[1:], dtype=np.float64).reshape(3, 4),
             'tag_rotation': cv2.Rodrigues(rvec)[0] @ ARUCO_TO_ROS.T,
             'tag_translation': tvec.astype(np.float64),
         })
-        if not self.anchor_pending():
+        if len(self.anchor_samples) >= self.anchor_min_observations:
+            self.anchor_observations, self.anchor_samples = self.anchor_samples, []
+            self.anchor_searching = False
             self.get_logger().info(f'anchor tag {self.anchor_id} averaged over {len(self.anchor_observations)} observations, aligning output to it')
 
     def anchor_tag_pose(self, timestamps, poses):
@@ -254,7 +290,7 @@ class ScaledOrbNode(Node):
 
     def alignment(self, timestamps, poses):
         """rotation and translation taking scaled slam world points to the published frame"""
-        if self.anchor_id is None or self.anchor_pending():
+        if self.anchor_observations is None:
             # no anchor yet: slam world axes, origin at the first frame
             return np.eye(3), -self.scale * poses[0, :, 3]
 
