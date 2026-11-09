@@ -1,4 +1,4 @@
-A ROS2 node that runs monocular ORB-SLAM3 and uses Aruco tags to provide metric-accurate scale.
+A ROS2 node that runs monocular ORB-SLAM3 and uses Aruco tags to provide metric-accurate scale, and uses a single tag with a known pose to anchor reconstruction/poses.
 
 ## Installation
 The included devcontainer does the following:
