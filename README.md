@@ -1,3 +1,5 @@
+A ROS2 node that runs monocular ORB-SLAM3 and uses Aruco tags to provide metric-accurate scale.
+
 ## Installation
 The included devcontainer does the following:
 1. Install dependencies
