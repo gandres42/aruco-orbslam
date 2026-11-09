@@ -6,8 +6,8 @@ ORB.vocabulary: "/usr/local/share/ORB_SLAM3/Vocabulary/ORBvoc.txt"
 
 # Video topics
 Topics.video: "/BlueROV2/video"
-Topics.annotated: "/aruco/annotated"
 Topics.trajectory: "/aruco/path"
+Topics.pose: "/aruco/pose"
 Topics.pointcloud: "/aruco/pointcloud"
 Topics.scale: "/aruco/scale"
 Topics.frameId: "map"

@@ -37,7 +37,7 @@ class ScaledOrbNode(Node):
         self.bridge = CvBridge()
 
         # node params live in the same settings file orb-slam3 uses
-        settings_file = os.path.join(get_package_share_directory('aruco_orbslam'), 'config', 'uffda.yaml')
+        settings_file = os.path.join(get_package_share_directory('aruco_orbslam'), 'config', 'config.yaml')
         fs = cv2.FileStorage(settings_file, cv2.FILE_STORAGE_READ) # pyrefly: ignore[bad-argument-count]
 
         def real(key, default=0.0) -> float:
@@ -96,6 +96,7 @@ class ScaledOrbNode(Node):
         self.frame_id = string('Topics.frameId')
         self.cam_sub = self.create_subscription(Image, string('Topics.video'), self.camera_cb, 1)
         self.trajectory_publisher = self.create_publisher(Path, string('Topics.trajectory'), 1)
+        self.pose_publisher = self.create_publisher(PoseStamped, string('Topics.pose'), 1)
         self.pointcloud_publisher = self.create_publisher(PointCloud2, string('Topics.pointcloud'), 1)
         self.scale_publisher = self.create_publisher(Float32, string('Topics.scale'), 1)
         fs.release()
@@ -115,19 +116,20 @@ class ScaledOrbNode(Node):
         self.check_map_reset(trajectory)
 
         # sample scale and anchor from frames that were localized (so the latest trajectory entry is their pose)
-        if tracked and trajectory and trajectory[-1][0] == timestamp:
+        localized = tracked and bool(trajectory) and trajectory[-1][0] == timestamp
+        if localized:
             detections = self.detect_tags(frame)
             if detections:
                 self.update_scale(frame, detections, trajectory[-1])
                 self.update_anchor(detections, trajectory[-1])
 
-        # publish SLAM trajectory and pointcloud, once anchored if anchoring is enabled
+        # publish SLAM trajectory, current pose and pointcloud, once anchored if anchoring is enabled
         if trajectory and (self.anchor_id is None or self.anchored()):
             trajectory = np.asarray(trajectory, dtype=np.float64)
             timestamps, poses = trajectory[:, 0], trajectory[:, 1:].reshape(-1, 3, 4)
             rotation, translation = self.alignment(timestamps, poses)
             header = Header(stamp=msg.header.stamp, frame_id=self.frame_id)
-            self.publish_trajectory(header, poses, rotation, translation)
+            self.publish_trajectory(header, poses, rotation, translation, localized)
             self.publish_pointcloud(header, rotation, translation)
 
         self.scale_publisher.publish(Float32(data=self.scale))
@@ -225,14 +227,17 @@ class ScaledOrbNode(Node):
         rotation = self.anchor_rotation @ tag_rotation.T
         return rotation, self.anchor_position - rotation @ tag_position
 
-    def publish_trajectory(self, header, poses, rotation, translation):
-        """Publish the camera trajectory in the published frame, with camera body axes in ROS convention"""
+    def publish_trajectory(self, header, poses, rotation, translation, localized):
+        """Publish the camera trajectory, and the latest pose if it is this frame's, with camera body axes in ROS convention"""
         positions = self.scale * poses[:, :, 3] @ rotation.T + translation
         quaternions = R.from_matrix(rotation @ poses[:, :, :3] @ CV_TO_ROS.T).as_quat()  # x, y, z, w
-        self.trajectory_publisher.publish(Path(header=header, poses=[
+        path = Path(header=header, poses=[
             PoseStamped(header=header, pose=Pose(position=Point(x=x, y=y, z=z), orientation=Quaternion(x=qx, y=qy, z=qz, w=qw)))
             for (x, y, z), (qx, qy, qz, qw) in zip(positions.tolist(), quaternions.tolist())
-        ]))
+        ])
+        self.trajectory_publisher.publish(path)
+        if localized:
+            self.pose_publisher.publish(path.poses[-1])
 
     def publish_pointcloud(self, header, rotation, translation):
         """Publish the slam map in the same frame as the trajectory"""
